@@ -1,0 +1,28 @@
+# Secrets
+service_account.json
+
+# Cache
+regime_cache.pkl
+__pycache__/
+
+# Logs
+*.log
+monitor.log
+
+# Generated results (large/binary)
+*.png
+backtest_results.html
+regime_results.html
+regime_results_v2.html
+ew_backtest_results.json
+ew_backtest_results.png
+ew_scanner_v2_results.json
+ew_scanner_v2_charts.png
+scanner_results.json
+scanner_results.png
+scanner_point0.json
+scanner_point0.png
+
+# State files
+monitor_state.json
+monitor_config.json

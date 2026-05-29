@@ -1,0 +1,10 @@
+flask
+numpy
+pandas
+scipy
+yfinance
+requests
+matplotlib
+lxml
+gspread
+google-auth
