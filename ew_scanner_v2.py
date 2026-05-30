@@ -26,7 +26,9 @@ warnings.filterwarnings('ignore')
 # CONSTANTS — Fibonacci ratios from Aleks's presentation
 # ═══════════════════════════════════════════════════════════════════════
 
-FIB_W2_IMPULSE = [0.382, 0.500, 0.618, 0.786, 0.887]
+# Per the EWT Notes, Wave 2 retraces 50/61.8/78.6/88.7% of Wave 1. Aleks enters deep
+# retracements, so 38.2% (too shallow / off-style) is excluded.
+FIB_W2_IMPULSE = [0.500, 0.618, 0.786, 0.887]
 FIB_W3_TARGETS = [0.382, 0.618, 0.786, 1.000, 1.618, 1.750, 2.272, 3.618]
 FIB_W4_IMPULSE = [0.236, 0.382, 0.500, 0.618]
 FIB_W5_TARGETS_W1 = [1.000]  # W5 = W1
@@ -548,16 +550,19 @@ def find_wave3_setups(swings, df, current_price, current_date, ticker=''):
         if risk_pct < MIN_RISK_PCT or risk_pct > MAX_RISK_PCT:
             continue
 
-        extensions = calc_extensions(w2_bottom['price'], w1_move)
-        t1 = w2_bottom['price'] + 1.000 * w1_move
-        t2 = w1_peak['price']
-        t3 = extensions.get(1.618, w2_bottom['price'] + 1.618 * w1_move)
+        # Wave-3 targets are Fibonacci extensions of W1 projected from the W2 low.
+        # Aleks marks 1.0 / 1.618 / 2.0+ extensions as targets (e.g. STM 1.618=$62.48,
+        # 2.0=$80.95); the old "T2 = W1 peak" capped exits ~0.6x too early.
+        t1 = w2_bottom['price'] + 1.000 * w1_move   # ~Wave-1 peak retest (first scale)
+        t2 = w2_bottom['price'] + 1.618 * w1_move   # classic Wave-3 extension (main target)
+        t3 = w2_bottom['price'] + 2.000 * w1_move   # extension runner
 
+        # If price already ran past a target, roll each up to the next level
         if t1 <= current_price:
             t1 = t2
         if t2 <= current_price:
             t2 = t3
-        if t2 < t1:
+        if t2 <= t1:
             t2 = t1 * 1.05
 
         rr_t1 = (t1 - current_price) / risk
@@ -1017,16 +1022,6 @@ class TradeManager:
         fav = self.max_price - self.entry
         old_stop = self.current_stop
 
-        # T2 hit — full (100%) exit
-        if self.t2 > 0 and high >= self.t2:
-            pnl = self.position_pct * (self.t2 - self.entry)
-            self.realized_pnl += pnl
-            self.status = 'T2_HIT'
-            self.exit_price = self.t2
-            self.history.append({'date': str(date), 'action': 'T2_HIT',
-                                 'price': self.t2, 'pnl': self.realized_pnl})
-            return {'action': 'T2_HIT', 'price': self.t2, 'pnl': self.realized_pnl}
-
         # Stage 2: risk reduction after 1R
         if fav >= self.initial_risk and self.stage < 2:
             new_stop = self.entry - self.initial_risk * 0.5
@@ -1044,19 +1039,30 @@ class TradeManager:
             self.current_stop = max(self.current_stop, trail)
             self.stage = 4
 
-        # T1 milestone: lock in profit and hold the full position for T2 (no partial sale)
+        # Stage 5: book 75% at T1, ride the remaining 25% to T2 (Aleks's two-stage exit)
         if self.t1 > 0 and high >= self.t1 and not self.t1_reached:
+            self.realized_pnl += 0.75 * (self.t1 - self.entry)
+            self.position_pct = 0.25
             self.t1_reached = True
             self.current_stop = max(self.current_stop, self.t1 - self.initial_risk)
             self.stage = max(self.stage, 5)
-            self.history.append({'date': str(date), 'action': 'T1_REACHED',
+            self.history.append({'date': str(date), 'action': 'PARTIAL_EXIT_75%',
                                  'price': self.t1, 'stop': self.current_stop})
 
-        # Past T1: tighter ATR trail on the full position
+        # Stage 6: tighter ATR trail on the 25% runner
         if self.t1_reached:
             trail = self.max_price - 2.0 * atr
             self.current_stop = max(self.current_stop, trail)
-            self.stage = max(self.stage, 5)
+            self.stage = max(self.stage, 6)
+
+        # T2 — exit the remaining 25%
+        if self.t2 > 0 and high >= self.t2 and self.t1_reached:
+            self.realized_pnl += self.position_pct * (self.t2 - self.entry)
+            self.status = 'T2_HIT'
+            self.exit_price = self.t2
+            self.history.append({'date': str(date), 'action': 'T2_HIT',
+                                 'price': self.t2, 'pnl': self.realized_pnl})
+            return {'action': 'T2_HIT', 'price': self.t2, 'pnl': self.realized_pnl}
 
         # Wave count invalidation: no progress after 30 bars
         if self.bars_since_entry >= 30 and fav < self.initial_risk and self.stage <= 1:

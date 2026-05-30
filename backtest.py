@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Aleks EWT Scanner v2 — 3-Year Walk-Forward Backtest
-1% of portfolio per trade (compounding), no duplicate positions, 100% exit at T2.
+1% of portfolio per trade (compounding), no duplicate positions, 75% exit at T1 / 25% to T2.
 Every entry decision is causal (no look-ahead): swing structure, weekly trend, and
 indicators are all evaluated using only data available at/before the entry bar.
 """
@@ -168,12 +168,13 @@ def find_setups_for_ticker(ticker, daily_df, weekly_df):
             rp = risk / ep * 100
             if rp < scanner.MIN_RISK_PCT or rp > scanner.MAX_RISK_PCT:
                 break
-            t1 = w2b['price'] + w1_move
-            t2 = w1p['price']
-            t3 = w2b['price'] + 1.618 * w1_move
+            # Fib-extension targets of W1 from the W2 low (matches the scanner)
+            t1 = w2b['price'] + 1.000 * w1_move   # ~W1 peak retest
+            t2 = w2b['price'] + 1.618 * w1_move   # classic Wave-3 extension
+            t3 = w2b['price'] + 2.000 * w1_move
             if t1 <= ep: t1 = t2
             if t2 <= ep: t2 = t3
-            if t2 < t1: t2 = t1 * 1.05
+            if t2 <= t1: t2 = t1 * 1.05
             rr = (t1 - ep) / risk
             if rr < scanner.MIN_RR_T1:
                 break
@@ -246,19 +247,26 @@ def run_simulation(all_setups, daily_data):
             hd = (date - tr['entry_date']).days
 
             if lo <= tr['current_stop']:
-                pnl = (tr['current_stop'] - e) * tr['shares']
+                pnl = tr['realized'] + tr['pos'] * (tr['current_stop'] - e) * tr['shares']
                 tr.update(exit_date=date, exit_price=tr['current_stop'], reason='STOP',
                           pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
                 trades.append(dict(tr)); closed.append(tk); continue
 
-            if hi >= tr['t2'] and tr['pos'] == 1.0:
-                pnl = (tr['t2'] - e) * tr['shares']
+            # Book 75% at T1, ride the remaining 25% to T2 (Aleks's two-stage exit)
+            if tr['pos'] == 1.0 and hi >= tr['t1']:
+                tr['realized'] += 0.75 * (tr['t1'] - e) * tr['shares']
+                tr['pos'] = 0.25
+                tr['current_stop'] = max(tr['current_stop'], tr['t1'] - r)
+                tr['stage'] = max(tr['stage'], 5)
+
+            if tr['pos'] < 1.0 and hi >= tr['t2']:
+                pnl = tr['realized'] + tr['pos'] * (tr['t2'] - e) * tr['shares']
                 tr.update(exit_date=date, exit_price=tr['t2'], reason='T2',
                           pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
                 trades.append(dict(tr)); closed.append(tk); continue
 
             if hd >= MAX_HOLD_DAYS:
-                pnl = (cl - e) * tr['shares']
+                pnl = tr['realized'] + tr['pos'] * (cl - e) * tr['shares']
                 tr.update(exit_date=date, exit_price=cl, reason='MAX_HOLD',
                           pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
                 trades.append(dict(tr)); closed.append(tk); continue
@@ -298,7 +306,8 @@ def run_simulation(all_setups, daily_data):
             if df is None or date not in df.index:
                 continue
             cl = float(df.loc[date, 'Close'])
-            unrealized += (cl - tr['entry_price']) * tr['shares']
+            # booked partial (75%) + mark-to-market of the remaining position
+            unrealized += tr['realized'] + tr['pos'] * (cl - tr['entry_price']) * tr['shares']
 
         equity_curve.append({
             'date': date,
@@ -312,7 +321,7 @@ def run_simulation(all_setups, daily_data):
         if df is None: continue
         cl = float(df['Close'].iloc[-1])
         hd = (bt_dates[-1] - tr['entry_date']).days
-        pnl = (cl - tr['entry_price']) * tr['shares']
+        pnl = tr['realized'] + tr['pos'] * (cl - tr['entry_price']) * tr['shares']
         tr.update(exit_date=bt_dates[-1], exit_price=cl, reason='BT_END',
                   pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
         trades.append(dict(tr))
@@ -451,7 +460,7 @@ tr:hover {{ background:#1a1a2e; }}
 img {{ width:100%; border-radius:8px; margin:15px 0; }}
 </style></head><body>
 <h1>Aleks EWT Scanner v2 — 3-Year Backtest</h1>
-<p class="subtitle">{BACKTEST_START.strftime('%b %Y')} — {BACKTEST_END.strftime('%b %Y')} · 1% per trade (compounding) · 100% exit at T2 · ${START_CAPITAL:,.0f} start · {stats['total_trades']} trades</p>
+<p class="subtitle">{BACKTEST_START.strftime('%b %Y')} — {BACKTEST_END.strftime('%b %Y')} · 1% per trade (compounding) · 75% at T1 / 25% to T2 · ${START_CAPITAL:,.0f} start · {stats['total_trades']} trades</p>
 
 <div class="cards">
 <div class="card"><div class="label">Total Return</div><div class="value {'pos' if stats['total_return']>=0 else 'neg'}">{stats['total_return']:+.1f}%</div></div>

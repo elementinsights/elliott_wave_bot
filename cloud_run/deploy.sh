@@ -51,7 +51,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --min-instances 0 \
     --no-allow-unauthenticated \
     --service-account "elliott-wave@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="^||^TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}||TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}||GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}||MIN_SCORE=95||SETUP_FILTERS=WAVE_3||REGIME_FILTER=true"
+    --set-env-vars="^||^TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}||TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}||GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}||MIN_SCORE=95||SETUP_FILTERS=WAVE_3,WAVE_5||REGIME_FILTER=true"
 
 # Get service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
