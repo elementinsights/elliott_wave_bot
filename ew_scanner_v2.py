@@ -146,7 +146,10 @@ def download_batch(tickers, start, end, interval='1d', batch_size=50, min_bars=5
                     else:
                         df = raw[t].copy()
                     if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.droplevel(1)
+                        # Keep the OHLC field level, drop the ticker level
+                        # (single-ticker downloads put the ticker on level 0).
+                        lvl1 = df.columns.get_level_values(1)
+                        df.columns = lvl1 if 'Close' in lvl1 else df.columns.get_level_values(0)
                     df = df.dropna(subset=['Close'])
                     if len(df) >= min_bars:
                         all_data[t] = df
@@ -197,13 +200,15 @@ def calculate_atr(df, period=14):
     return tr.ewm(alpha=1/period, min_periods=period).mean()
 
 def calculate_indicators(df):
+    macd_line, macd_signal, macd_hist = calculate_macd(df)
+    stoch_k, stoch_d = calculate_stochastic(df)
     return {
         'rsi': calculate_rsi(df),
-        'macd_line': calculate_macd(df)[0],
-        'macd_signal': calculate_macd(df)[1],
-        'macd_hist': calculate_macd(df)[2],
-        'stoch_k': calculate_stochastic(df)[0],
-        'stoch_d': calculate_stochastic(df)[1],
+        'macd_line': macd_line,
+        'macd_signal': macd_signal,
+        'macd_hist': macd_hist,
+        'stoch_k': stoch_k,
+        'stoch_d': stoch_d,
         'atr': calculate_atr(df),
     }
 
@@ -736,19 +741,7 @@ def find_correction_setups(swings, df, current_price, current_date, ticker=''):
             if correction_days < 30:
                 continue
 
-            impulse_move = peak['price'] - min(s['price'] for s in all_lows if s['date'] <= peak['date']) \
-                if any(s['date'] <= peak['date'] for s in all_lows) else peak['price']
-
-            for fib_ratio in FIB_CORRECTION_RETRACE:
-                fib_level = peak['price'] - fib_ratio * (peak['price'] - all_lows[0]['price']) \
-                    if all_lows[0]['date'] < peak['date'] else peak['price'] * (1 - fib_ratio)
-
             full_range = peak['price'] - trough['price']
-            entry_retrace = (peak['price'] - current_price) / (peak['price'] - trough['price']) \
-                if peak['price'] != trough['price'] else 0
-
-            for fib in FIB_CORRECTION_RETRACE:
-                fib_price = peak['price'] - fib * (peak['price'] - trough['price']) + trough['price']
 
             days_since = (current_date - trough['date']).days
             if days_since > 90 or days_since < 0:
@@ -889,7 +882,7 @@ def score_candidate(candidate, indicators, weekly_trend, df):
     score = 0
 
     # 1. Wave Structure Quality (0-30)
-    fd = candidate.get('fib_distance', candidate.get('fib_distance', 0.1))
+    fd = candidate.get('fib_distance', 0.1)
     if fd < 0.02:   score += 30
     elif fd < 0.04: score += 25
     elif fd < 0.06: score += 18
@@ -943,9 +936,8 @@ def score_candidate(candidate, indicators, weekly_trend, df):
         vol_5 = df['Volume'].tail(5).mean()
         if vol_5 > vol_20 * 1.3:
             score += 3
-        vol_recent = df['Volume'].tail(20).mean()
-        vol_prior = df['Volume'].iloc[-40:-20].mean() if len(df) > 40 else vol_recent
-        if vol_recent < vol_prior * 0.7:
+        vol_prior = df['Volume'].iloc[-40:-20].mean() if len(df) > 40 else vol_20
+        if vol_20 < vol_prior * 0.7:
             score += 2
 
     # 8. Freshness (0-10)
@@ -997,11 +989,12 @@ class TradeManager:
         self.t2 = signal.get('t2', signal['t1'] * 1.2)
         self.initial_risk = self.entry - self.initial_stop
         self.max_price = self.entry
-        self.partial_taken = False
+        self.t1_reached = False
         self.position_pct = 1.0
         self.realized_pnl = 0.0
         self.stage = 1
         self.status = 'OPEN'
+        self.exit_price = None
         self.entry_date = signal.get('entry_date', datetime.now().strftime('%Y-%m-%d'))
         self.bars_since_entry = 0
         self.bars_at_breakeven = 0
@@ -1015,6 +1008,7 @@ class TradeManager:
             pnl = self.position_pct * (self.current_stop - self.entry)
             self.realized_pnl += pnl
             self.status = 'STOPPED'
+            self.exit_price = self.current_stop
             self.history.append({'date': str(date), 'action': 'STOP_HIT',
                                  'price': self.current_stop, 'pnl': self.realized_pnl})
             return {'action': 'STOP_HIT', 'price': self.current_stop, 'pnl': self.realized_pnl}
@@ -1022,6 +1016,16 @@ class TradeManager:
         self.max_price = max(self.max_price, high)
         fav = self.max_price - self.entry
         old_stop = self.current_stop
+
+        # T2 hit — full (100%) exit
+        if self.t2 > 0 and high >= self.t2:
+            pnl = self.position_pct * (self.t2 - self.entry)
+            self.realized_pnl += pnl
+            self.status = 'T2_HIT'
+            self.exit_price = self.t2
+            self.history.append({'date': str(date), 'action': 'T2_HIT',
+                                 'price': self.t2, 'pnl': self.realized_pnl})
+            return {'action': 'T2_HIT', 'price': self.t2, 'pnl': self.realized_pnl}
 
         # Stage 2: risk reduction after 1R
         if fav >= self.initial_risk and self.stage < 2:
@@ -1034,43 +1038,32 @@ class TradeManager:
             self.current_stop = max(self.current_stop, self.entry)
             self.stage = 3
 
-        # Stage 4: trail with ATR
+        # Stage 4: trail with ATR after 3R
         if fav >= 3 * self.initial_risk and self.stage < 4:
             trail = self.max_price - 2.5 * atr
             self.current_stop = max(self.current_stop, trail)
             self.stage = 4
 
-        # Stage 5: partial exit at T1
-        if high >= self.t1 and not self.partial_taken:
-            partial_pnl = 0.75 * (self.t1 - self.entry)
-            self.realized_pnl += partial_pnl
-            self.position_pct = 0.25
-            self.partial_taken = True
+        # T1 milestone: lock in profit and hold the full position for T2 (no partial sale)
+        if self.t1 > 0 and high >= self.t1 and not self.t1_reached:
+            self.t1_reached = True
             self.current_stop = max(self.current_stop, self.t1 - self.initial_risk)
-            self.stage = 5
-            self.history.append({'date': str(date), 'action': 'PARTIAL_EXIT_75%',
+            self.stage = max(self.stage, 5)
+            self.history.append({'date': str(date), 'action': 'T1_REACHED',
                                  'price': self.t1, 'stop': self.current_stop})
 
-        # Stage 6: aggressive trail on remainder
-        if self.partial_taken:
+        # Past T1: tighter ATR trail on the full position
+        if self.t1_reached:
             trail = self.max_price - 2.0 * atr
             self.current_stop = max(self.current_stop, trail)
-            self.stage = 6
-
-        # T2 hit
-        if high >= self.t2 and self.partial_taken:
-            remaining_pnl = self.position_pct * (self.t2 - self.entry)
-            self.realized_pnl += remaining_pnl
-            self.status = 'T2_HIT'
-            self.history.append({'date': str(date), 'action': 'T2_HIT',
-                                 'price': self.t2, 'pnl': self.realized_pnl})
-            return {'action': 'T2_HIT', 'price': self.t2, 'pnl': self.realized_pnl}
+            self.stage = max(self.stage, 5)
 
         # Wave count invalidation: no progress after 30 bars
         if self.bars_since_entry >= 30 and fav < self.initial_risk and self.stage <= 1:
             pnl = self.position_pct * (close - self.entry)
             self.realized_pnl += pnl
             self.status = 'INVALIDATED'
+            self.exit_price = close
             self.history.append({'date': str(date), 'action': 'WAVE_INVALID',
                                  'price': close, 'pnl': self.realized_pnl})
             return {'action': 'WAVE_INVALID', 'price': close, 'pnl': self.realized_pnl}
@@ -1085,6 +1078,7 @@ class TradeManager:
                 pnl = self.position_pct * (close - self.entry)
                 self.realized_pnl += pnl
                 self.status = 'STALL_EXIT'
+                self.exit_price = close
                 self.history.append({'date': str(date), 'action': 'STALL_EXIT',
                                      'price': close, 'pnl': self.realized_pnl})
                 return {'action': 'STALL_EXIT', 'price': close, 'pnl': self.realized_pnl}
@@ -1101,11 +1095,12 @@ class TradeManager:
             'entry': self.entry, 'initial_stop': self.initial_stop,
             'current_stop': self.current_stop, 't1': self.t1, 't2': self.t2,
             'initial_risk': self.initial_risk, 'max_price': self.max_price,
-            'partial_taken': self.partial_taken, 'position_pct': self.position_pct,
+            't1_reached': self.t1_reached, 'position_pct': self.position_pct,
             'realized_pnl': self.realized_pnl, 'stage': self.stage,
             'status': self.status, 'entry_date': self.entry_date,
             'bars_since_entry': self.bars_since_entry,
             'bars_at_breakeven': self.bars_at_breakeven,
+            'exit_price': self.exit_price,
             'history': self.history,
         }
 
@@ -1118,13 +1113,14 @@ class TradeManager:
         tm.current_stop = d['current_stop']
         tm.initial_risk = d['initial_risk']
         tm.max_price = d['max_price']
-        tm.partial_taken = d['partial_taken']
+        tm.t1_reached = d.get('t1_reached', d.get('partial_taken', False))
         tm.position_pct = d['position_pct']
         tm.realized_pnl = d['realized_pnl']
         tm.stage = d['stage']
         tm.status = d['status']
         tm.bars_since_entry = d['bars_since_entry']
         tm.bars_at_breakeven = d['bars_at_breakeven']
+        tm.exit_price = d.get('exit_price')
         tm.history = d['history']
         return tm
 

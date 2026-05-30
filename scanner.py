@@ -356,9 +356,15 @@ def download_batch(tickers, start, end, batch_size=50):
                              group_by='ticker', progress=False, threads=True)
 
             if len(batch) == 1:
-                # Single ticker returns flat dataframe
+                # Single ticker with group_by='ticker' returns a MultiIndex
+                # (ticker on level 0, OHLC field on level 1). Flatten to the
+                # level that actually holds 'Close' so df['Close'] etc. work.
                 t = batch[0]
-                if len(data) > 0:
+                if isinstance(data.columns, pd.MultiIndex):
+                    lvl1 = data.columns.get_level_values(1)
+                    data.columns = lvl1 if 'Close' in lvl1 else data.columns.get_level_values(0)
+                data = data.dropna(how='all')
+                if len(data) > 50:
                     all_data[t] = data
             else:
                 for t in batch:

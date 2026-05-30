@@ -52,7 +52,12 @@ def download_batch(tickers, start, end, interval='1d', batch_size=50):
                     else:
                         df = raw[t].copy()
                     if isinstance(df.columns, pd.MultiIndex):
-                        df.columns = df.columns.droplevel(1)
+                        # Keep whichever level holds the OHLC field names.
+                        # With group_by='ticker' the ticker is on level 0 and the
+                        # field ('Close', ...) on level 1, so a blind droplevel(1)
+                        # would drop the field level and leave ticker names.
+                        lvl1 = df.columns.get_level_values(1)
+                        df.columns = lvl1 if 'Close' in lvl1 else df.columns.get_level_values(0)
                     df = df.dropna(subset=['Close'])
                     if len(df) >= 100:
                         all_data[t] = df

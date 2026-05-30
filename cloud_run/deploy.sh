@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Always run from this script's own directory so the relative paths below resolve.
+cd "$(dirname "$0")"
+
 PROJECT_ID="absolute-theme-497607-e6"
 REGION="us-central1"
 SERVICE_NAME="elliott-wave"
@@ -68,28 +71,30 @@ gcloud scheduler jobs delete "ew-daily-scan" \
 gcloud scheduler jobs create http "ew-daily-scan" \
     --location "${REGION}" \
     --project "${PROJECT_ID}" \
-    --schedule "30 21 * * 1-5" \
+    --schedule "30 16 * * 1-5" \
+    --time-zone "America/New_York" \
     --uri "${SERVICE_URL}/scan" \
     --http-method GET \
     --oidc-service-account-email "${SA_EMAIL}" \
     --oidc-token-audience "${SERVICE_URL}" \
     --attempt-deadline 1800s \
-    --description "Daily EWT scan after market close"
+    --description "Daily EWT scan after market close (4:30 PM ET)"
 
-# Monitor: every 30 minutes, weekdays only
+# Monitor: every 30 minutes during market hours, weekdays only
 gcloud scheduler jobs delete "ew-monitor" \
     --location "${REGION}" --project "${PROJECT_ID}" --quiet 2>/dev/null || true
 
 gcloud scheduler jobs create http "ew-monitor" \
     --location "${REGION}" \
     --project "${PROJECT_ID}" \
-    --schedule "*/30 * * * 1-5" \
+    --schedule "*/30 9-16 * * 1-5" \
+    --time-zone "America/New_York" \
     --uri "${SERVICE_URL}/monitor" \
     --http-method GET \
     --oidc-service-account-email "${SA_EMAIL}" \
     --oidc-token-audience "${SERVICE_URL}" \
     --attempt-deadline 300s \
-    --description "EWT entry monitor every 30 min"
+    --description "EWT entry monitor every 30 min during market hours"
 
 # Clean up copied files from build context
 rm -f ew_scanner_v2.py ew_monitor.py service_account.json
@@ -98,7 +103,7 @@ echo ""
 echo "=== Deploy complete ==="
 echo "Service:  ${SERVICE_URL}"
 echo "Scanner:  daily at 4:30 PM ET (Mon-Fri)"
-echo "Monitor:  every 30 min (Mon-Fri)"
+echo "Monitor:  every 30 min during market hours (Mon-Fri)"
 echo ""
 echo "Test endpoints:"
 echo "  curl -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" ${SERVICE_URL}/"

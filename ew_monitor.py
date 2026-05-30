@@ -39,9 +39,10 @@ SCANNER_RESULTS = BASE_DIR / 'ew_scanner_v2_results.json'
 # CONFIG & STATE
 # ═══════════════════════════════════════════════════════════════════════
 
-MIN_SCORE = 100
-SETUP_FILTERS = ['WAVE_3', 'WAVE_5', 'CORRECTION']
-REGIME_FILTER_ENABLED = True
+# Aligned with the Cloud Run deployment via env vars (defaults match live config).
+MIN_SCORE = int(os.environ.get('MIN_SCORE', '95'))
+SETUP_FILTERS = os.environ.get('SETUP_FILTERS', 'WAVE_3').split(',')
+REGIME_FILTER_ENABLED = os.environ.get('REGIME_FILTER', 'true').lower() == 'true'
 
 DEFAULT_CONFIG = {
     'telegram_bot_token': '',
@@ -389,7 +390,7 @@ def fmt_entry(ticker, c, analysis, daily):
 
 def fmt_stop_update(ticker, old, new, stage, price):
     stages = {1: 'Initial', 2: 'Risk Reduced', 3: 'Breakeven',
-              4: 'Trailing', 5: 'Post-T1', 6: 'Aggressive Trail'}
+              4: 'Trailing', 5: 'Post-T1 Trail'}
     msg = f"Stop Update • {ticker}\n"
     msg += f"Stop: ${old:.2f} → ${new:.2f}\n"
     msg += f"Price: ${price:.2f}\n"
@@ -402,11 +403,11 @@ def fmt_exit(ticker, action, price, pnl):
     msg += f"P&L: {pnl:+.1f}%"
     return msg
 
-def fmt_t1_hit(ticker, t1, entry):
+def fmt_t1_hit(ticker, t1, entry, new_stop):
     pnl = (t1 - entry) / entry * 100
-    msg = f"Target 1 Hit • {ticker}\n"
-    msg += f"T1: ${t1:.2f} reached (+{pnl:.1f}%)\n"
-    msg += f"Sell 75%, trail remainder"
+    msg = f"Target 1 Reached • {ticker}\n"
+    msg += f"T1: ${t1:.2f} (+{pnl:.1f}%) — holding full position for T2\n"
+    msg += f"Stop raised to ${new_stop:.2f}"
     return msg
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -430,7 +431,8 @@ def refresh_watchlist(state, config):
             new_tickers.append(c['ticker'])
     state['watchlist'] = candidates[:max_w]
     state['last_scan'] = datetime.now().isoformat()
-    print(f"  Watchlist: {len(state['watchlist'])} tickers ({len(new_tickers)} new) [WAVE_3, score >= {MIN_SCORE}]")
+    print(f"  Watchlist: {len(state['watchlist'])} tickers ({len(new_tickers)} new) "
+          f"[{','.join(SETUP_FILTERS)}, score >= {MIN_SCORE}]")
     return new_tickers
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -448,10 +450,19 @@ def update_trade(trade, bar_high, bar_low, bar_close, atr_val):
 
     trade['bars_since_entry'] = trade.get('bars_since_entry', 0) + 1
 
+    # Stop hit — full exit
     if bar_low <= trade['current_stop']:
         pnl = (trade['current_stop'] - entry) / entry * 100
         trade['status'] = 'CLOSED'
+        trade['exit_price'] = trade['current_stop']
         return fmt_exit(trade['ticker'], 'STOP HIT', trade['current_stop'], pnl)
+
+    # T2 hit — full (100%) exit
+    if trade['t2'] > 0 and bar_high >= trade['t2']:
+        pnl = (trade['t2'] - entry) / entry * 100
+        trade['status'] = 'CLOSED'
+        trade['exit_price'] = trade['t2']
+        return fmt_exit(trade['ticker'], 'T2 HIT', trade['t2'], pnl)
 
     trade['max_price'] = max(trade.get('max_price', entry), bar_high)
     fav = trade['max_price'] - entry
@@ -463,23 +474,20 @@ def update_trade(trade, bar_high, bar_low, bar_close, atr_val):
         trade['current_stop'] = max(trade['current_stop'], entry)
         trade['stage'] = 3
     if fav >= 3 * initial_risk and trade.get('stage', 1) < 4:
-        trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 2.0 * atr_val)
+        trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 2.5 * atr_val)
         trade['stage'] = 4
 
-    if bar_high >= trade['t1'] and not trade.get('partial_taken'):
-        trade['partial_taken'] = True
+    # T1 milestone — lock in profit and hold the full position for T2 (no partial sale)
+    if trade['t1'] > 0 and bar_high >= trade['t1'] and not trade.get('t1_reached'):
+        trade['t1_reached'] = True
         trade['current_stop'] = max(trade['current_stop'], trade['t1'] - initial_risk)
-        trade['stage'] = 5
-        return fmt_t1_hit(trade['ticker'], trade['t1'], entry)
+        trade['stage'] = max(trade.get('stage', 1), 5)
+        return fmt_t1_hit(trade['ticker'], trade['t1'], entry, trade['current_stop'])
 
-    if trade.get('partial_taken'):
-        trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 1.5 * atr_val)
-        trade['stage'] = 6
-
-    if bar_high >= trade['t2'] and trade.get('partial_taken'):
-        pnl = (trade['t2'] - entry) / entry * 100
-        trade['status'] = 'CLOSED'
-        return fmt_exit(trade['ticker'], 'T2 HIT', trade['t2'], pnl)
+    # Past T1: tighter trail on the full position
+    if trade.get('t1_reached'):
+        trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 2.0 * atr_val)
+        trade['stage'] = max(trade.get('stage', 1), 5)
 
     if trade['current_stop'] != old_stop:
         return fmt_stop_update(trade['ticker'], old_stop, trade['current_stop'],
@@ -710,7 +718,7 @@ def main():
                     'entry': c.get('entry', 0), 'initial_stop': c.get('stop', 0),
                     'current_stop': c.get('stop', 0), 't1': c.get('t1', 0),
                     't2': c.get('t2', 0), 'max_price': c.get('entry', 0),
-                    'partial_taken': False, 'stage': 1, 'status': 'OPEN',
+                    't1_reached': False, 'stage': 1, 'status': 'OPEN',
                     'entry_date': datetime.now().strftime('%Y-%m-%d'),
                     'bars_since_entry': 0,
                 }

@@ -42,7 +42,7 @@ WATCHLIST_HEADERS = ['ticker', 'setup_type', 'score', 'entry', 'stop', 't1', 't2
 TRADE_LOG_HEADERS = ['timestamp', 'type', 'ticker', 'entry', 'stop', 'target',
                      'price', 'pnl_pct', 'notes']
 OPEN_TRADES_HEADERS = ['ticker', 'setup_type', 'entry', 'initial_stop', 'current_stop',
-                       't1', 't2', 'max_price', 'partial_taken', 'stage', 'status',
+                       't1', 't2', 'max_price', 't1_reached', 'stage', 'status',
                        'entry_date', 'bars_since_entry']
 ALERT_HISTORY_HEADERS = ['timestamp', 'ticker', 'type']
 
@@ -160,7 +160,8 @@ def read_open_trades(sh):
     for r in records:
         for k in ('entry', 'initial_stop', 'current_stop', 't1', 't2', 'max_price'):
             r[k] = _safe_float(r.get(k))
-        r['partial_taken'] = str(r.get('partial_taken', '')).lower() == 'true'
+        # Backward compatible with the old 'partial_taken' column name.
+        r['t1_reached'] = str(r.get('t1_reached', r.get('partial_taken', ''))).lower() == 'true'
         r['stage'] = int(_safe_float(r.get('stage'), 1))
         r['bars_since_entry'] = int(_safe_float(r.get('bars_since_entry'), 0))
     return records
@@ -178,7 +179,7 @@ def write_open_trades(sh, trades):
             t.get('ticker', ''), t.get('setup_type', ''),
             t.get('entry', 0), t.get('initial_stop', 0), t.get('current_stop', 0),
             t.get('t1', 0), t.get('t2', 0), t.get('max_price', 0),
-            str(t.get('partial_taken', False)),
+            str(t.get('t1_reached', False)),
             t.get('stage', 1), t.get('status', 'OPEN'),
             t.get('entry_date', ''), t.get('bars_since_entry', 0),
         ])
@@ -416,7 +417,12 @@ def monitor_endpoint():
               f" [market {'OPEN' if market_open else 'CLOSED'}]"
               f" [regime {'BULLISH' if regime_bullish else 'BEARISH'}]")
 
-        for c in watchlist:
+        if not market_open:
+            print("  Market closed — skipping new-entry scan, managing open trades only")
+
+        # New-entry scan only runs during market hours; open-trade management below
+        # always runs (end-of-day stop updates use the settled daily bar).
+        for c in (watchlist if market_open else []):
             ticker = c.get('ticker', '')
             if not ticker:
                 continue
@@ -438,12 +444,12 @@ def monitor_endpoint():
                     print(f"  [INVALID]")
                     continue
 
+                entry_found = False
                 if ticker in open_tickers:
                     print(f"  [IN TRADE]", end='')
                 elif not regime_bullish:
                     print(f"  [REGIME OFF]", end='')
                 else:
-                    entry_found = False
                     for tf, tf_df in [('DAILY', daily_df), ('WEEKLY', weekly_df)]:
                         analysis = monitor.analyze_fib_entry(tf_df, tf, c)
                         alert_key = f'{tf}_ENTRY'
@@ -479,7 +485,7 @@ def monitor_endpoint():
                                 't1': daily['t1'],
                                 't2': daily.get('t2', 0),
                                 'max_price': entry_price,
-                                'partial_taken': False,
+                                't1_reached': False,
                                 'stage': 1,
                                 'status': 'OPEN',
                                 'entry_date': datetime.now().strftime('%Y-%m-%d'),
@@ -488,6 +494,7 @@ def monitor_endpoint():
                             open_trades.append(trade)
                             open_tickers.add(ticker)
                             print(f" [TRADE OPENED]", end='')
+                            break  # one entry per ticker per cycle (don't also open on WEEKLY)
 
                 if not entry_found and daily['status'] == 'APPROACHING':
                     print(f"  [APPROACHING]", end='')
@@ -517,9 +524,10 @@ def monitor_endpoint():
                 if msg:
                     send_telegram(msg)
                     if trade.get('status') == 'CLOSED':
-                        pnl = (trade['current_stop'] - trade['entry']) / trade['entry'] * 100
+                        exit_price = trade.get('exit_price', trade['current_stop'])
+                        pnl = (exit_price - trade['entry']) / trade['entry'] * 100
                         log_trade_event(sh, 'EXIT', ticker,
-                                        entry=trade['entry'], price=trade['current_stop'],
+                                        entry=trade['entry'], price=exit_price,
                                         pnl_pct=f"{pnl:.1f}")
                     else:
                         log_trade_event(sh, 'STOP_UPDATE', ticker,
