@@ -3,6 +3,8 @@ service_account.json
 
 # Cache
 regime_cache.pkl
+opt_cache.pkl
+optimize_results.json
 __pycache__/
 
 # Logs

@@ -26,9 +26,9 @@ warnings.filterwarnings('ignore')
 # CONSTANTS — Fibonacci ratios from Aleks's presentation
 # ═══════════════════════════════════════════════════════════════════════
 
-# Per the EWT Notes, Wave 2 retraces 50/61.8/78.6/88.7% of Wave 1. Aleks enters deep
-# retracements, so 38.2% (too shallow / off-style) is excluded.
-FIB_W2_IMPULSE = [0.500, 0.618, 0.786, 0.887]
+# Wave 2 retracement band. Includes 38.2% — the optimizer sweep found the wider band
+# (paired with the dist-200 entry filter) gave the more robust, higher-Sharpe edge.
+FIB_W2_IMPULSE = [0.382, 0.500, 0.618, 0.786, 0.887]
 FIB_W3_TARGETS = [0.382, 0.618, 0.786, 1.000, 1.618, 1.750, 2.272, 3.618]
 FIB_W4_IMPULSE = [0.236, 0.382, 0.500, 0.618]
 FIB_W5_TARGETS_W1 = [1.000]  # W5 = W1
@@ -1039,30 +1039,14 @@ class TradeManager:
             self.current_stop = max(self.current_stop, trail)
             self.stage = 4
 
-        # Stage 5: book 75% at T1, ride the remaining 25% to T2 (Aleks's two-stage exit)
-        if self.t1 > 0 and high >= self.t1 and not self.t1_reached:
-            self.realized_pnl += 0.75 * (self.t1 - self.entry)
-            self.position_pct = 0.25
-            self.t1_reached = True
-            self.current_stop = max(self.current_stop, self.t1 - self.initial_risk)
-            self.stage = max(self.stage, 5)
-            self.history.append({'date': str(date), 'action': 'PARTIAL_EXIT_75%',
-                                 'price': self.t1, 'stop': self.current_stop})
-
-        # Stage 6: tighter ATR trail on the 25% runner
-        if self.t1_reached:
-            trail = self.max_price - 2.0 * atr
-            self.current_stop = max(self.current_stop, trail)
-            self.stage = max(self.stage, 6)
-
-        # T2 — exit the remaining 25%
-        if self.t2 > 0 and high >= self.t2 and self.t1_reached:
-            self.realized_pnl += self.position_pct * (self.t2 - self.entry)
-            self.status = 'T2_HIT'
-            self.exit_price = self.t2
-            self.history.append({'date': str(date), 'action': 'T2_HIT',
-                                 'price': self.t2, 'pnl': self.realized_pnl})
-            return {'action': 'T2_HIT', 'price': self.t2, 'pnl': self.realized_pnl}
+        # Exit 100% at T1 — highest-Sharpe exit (optimizer sweep; returns come from sizing)
+        if self.t1 > 0 and high >= self.t1:
+            self.realized_pnl += self.position_pct * (self.t1 - self.entry)
+            self.status = 'T1_EXIT'
+            self.exit_price = self.t1
+            self.history.append({'date': str(date), 'action': 'T1_EXIT',
+                                 'price': self.t1, 'pnl': self.realized_pnl})
+            return {'action': 'T1_EXIT', 'price': self.t1, 'pnl': self.realized_pnl}
 
         # Wave count invalidation: no progress after 30 bars
         if self.bars_since_entry >= 30 and fav < self.initial_risk and self.stage <= 1:
@@ -1393,6 +1377,13 @@ def apply_universe_filters(daily_data):
 def analyze_ticker(ticker, daily_df, weekly_df):
     current_price = float(daily_df['Close'].iloc[-1])
     current_date = daily_df.index[-1]
+
+    # Edge filter (optimizer): skip names extended >15% above their 200-day SMA —
+    # buy pullbacks near the 200d, don't chase. Dominant lift in the parameter sweep.
+    if len(daily_df) >= 200:
+        sma200 = float(daily_df['Close'].rolling(200).mean().iloc[-1])
+        if sma200 > 0 and (current_price - sma200) / sma200 > 0.15:
+            return []
 
     weekly_info = count_weekly_waves(weekly_df)
     if weekly_info['trend'] == 'BEARISH':
