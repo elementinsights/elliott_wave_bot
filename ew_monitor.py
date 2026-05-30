@@ -43,6 +43,8 @@ SCANNER_RESULTS = BASE_DIR / 'ew_scanner_v2_results.json'
 MIN_SCORE = int(os.environ.get('MIN_SCORE', '95'))
 SETUP_FILTERS = os.environ.get('SETUP_FILTERS', 'WAVE_3').split(',')
 REGIME_FILTER_ENABLED = os.environ.get('REGIME_FILTER', 'true').lower() == 'true'
+POSITION_PCT = float(os.environ.get('POSITION_PCT', '0.05'))   # notional % of account per trade
+ACCOUNT_SIZE = float(os.environ.get('ACCOUNT_SIZE', '0'))       # 0 = show % only (no share count)
 
 DEFAULT_CONFIG = {
     'telegram_bot_token': '',
@@ -369,23 +371,32 @@ def fmt_approaching(ticker, c, daily, dist_pct):
     msg += f"Target(s): {targets}"
     return msg
 
-def fmt_entry(ticker, c, analysis, daily):
+def fmt_entry(ticker, c, analysis, daily, position_pct=0.05, account_size=0):
     sig = analysis['entry_signal']
     tf = analysis['timeframe']
     score = c.get('score', 0)
     setup = c.get('setup_type', '')
     wave_labels = {'WAVE_3': 'Wave 3', 'WAVE_5': 'Wave 5', 'CORRECTION': 'Wave 1'}
     wave = wave_labels.get(setup, setup)
+    entry = sig.get('entry', 0)
     msg = f"Trade Alert • {ticker} • Score: {score:.0f}\n"
     msg += f"LONG (BUY) — {tf} — {wave} Entry\n"
     msg += f"Regime: BULLISH (SPY SMA20>SMA50)\n"
-    msg += f"Entry: ${sig['entry']:.2f}\n"
+    msg += f"Entry: ${entry:.2f}\n"
     if daily:
-        msg += f"Stop: ${daily['stop']:.2f}\n"
+        stop = daily['stop']
+        msg += f"Stop: ${stop:.2f}\n"
         targets = f"${daily['t1']:.2f}"
         if daily['t2']:
             targets += f", ${daily['t2']:.2f}"
         msg += f"Target(s): {targets}"
+        # Suggested position size (notional % of account; stop-risk % is account-independent)
+        if entry > 0 and position_pct > 0:
+            stop_risk = position_pct * (entry - stop) / entry if entry > stop else 0
+            msg += f"\nSize: {position_pct:.0%} of account (stop risk ≈ {stop_risk:.1%} of acct)"
+            if account_size > 0:
+                shares = int(account_size * position_pct / entry)
+                msg += f"\n≈ {shares} sh (${account_size * position_pct:,.0f} of ${account_size:,.0f})"
     return msg
 
 def fmt_stop_update(ticker, old, new, stage, price):
@@ -547,7 +558,7 @@ def run_monitor(state, config, force_scan=False):
                 analysis = analyze_fib_entry(tf_df, tf, c)
                 alert_key = f'{tf}_ENTRY'
                 if analysis and analysis.get('entry_signal') and should_alert(ticker, alert_key, state, config):
-                    msg = fmt_entry(ticker, c, analysis, daily)
+                    msg = fmt_entry(ticker, c, analysis, daily, POSITION_PCT, ACCOUNT_SIZE)
                     alerts.append((ticker, alert_key, msg))
                     print(f"  [{tf} ENTER]", end='')
                     entry_found = True
