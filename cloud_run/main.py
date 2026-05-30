@@ -529,6 +529,12 @@ def monitor_endpoint():
                         log_trade_event(sh, 'EXIT', ticker,
                                         entry=trade['entry'], price=exit_price,
                                         pnl_pct=f"{pnl:.1f}")
+                    elif trade.pop('partial_event', False):
+                        pnl = (trade['t1'] - trade['entry']) / trade['entry'] * 100
+                        log_trade_event(sh, 'PARTIAL', ticker,
+                                        entry=trade['entry'], price=trade['t1'],
+                                        pnl_pct=f"{pnl:.1f}",
+                                        notes="Booked 75% at T1, riding 25% to T2")
                     else:
                         log_trade_event(sh, 'STOP_UPDATE', ticker,
                                         stop=trade['current_stop'],
