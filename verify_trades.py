@@ -60,7 +60,10 @@ def analyze_trade(ticker, entry_price, stop, t1, t2, approx_entry_date=None,
         print(f"  ERROR: No data for {ticker}")
         return
     if isinstance(df.columns, pd.MultiIndex):
-        df.columns = df.columns.droplevel(1)
+        # Robustly keep the OHLC field level (the one containing 'Close'),
+        # whether the ticker is on level 0 (group_by='ticker') or level 1.
+        lvl1 = df.columns.get_level_values(1)
+        df.columns = lvl1 if 'Close' in lvl1 else df.columns.get_level_values(0)
 
     # Find the entry date (when price was near entry_price)
     if approx_entry_date:

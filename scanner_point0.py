@@ -137,8 +137,7 @@ def analyze_point0(df, ticker):
                         continue  # not the actual bottom
 
                 # Check for bearish sub-wave count in correction
-                corr_df = df.loc[peak_date:bottom_date]
-                corr_swings = find_swings(corr_df, order=max(5, swing_order // 2))
+                corr_swings = find_swings(corr_window, order=max(5, swing_order // 2))
                 n_corr_swings = len(corr_swings)
 
                 # Volume analysis — is volume increasing off the bottom?
@@ -302,6 +301,13 @@ for i in range(0, total, 50):
         data = yf.download(' '.join(batch), start=start_date, end=end_date,
                           interval='1d', group_by='ticker', progress=False, threads=True)
         if len(batch) == 1:
+            # Single ticker with group_by='ticker' returns a MultiIndex
+            # (ticker on level 0, OHLC field on level 1). Flatten to the
+            # level that actually holds 'Close' so df['Close'] etc. work.
+            if isinstance(data.columns, pd.MultiIndex):
+                lvl1 = data.columns.get_level_values(1)
+                data.columns = lvl1 if 'Close' in lvl1 else data.columns.get_level_values(0)
+            data = data.dropna(how='all')
             if len(data) > 50:
                 all_data[batch[0]] = data
         else:

@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """
-Aleks EWT Scanner v2 — 3-Year Backtest
-1% of portfolio per trade (compounding), no duplicate positions, 6-stage stop management.
+Aleks EWT Scanner v2 — 3-Year Walk-Forward Backtest
+1% of portfolio per trade (compounding), no duplicate positions, 100% exit at T2.
+Every entry decision is causal (no look-ahead): swing structure, weekly trend, and
+indicators are all evaluated using only data available at/before the entry bar.
 """
 
 import sys, os, time, webbrowser, base64, warnings
@@ -91,56 +93,81 @@ def download_all_data():
 
 
 def find_setups_for_ticker(ticker, daily_df, weekly_df):
-    weekly_info = scanner.count_weekly_waves(weekly_df)
-    if weekly_info['trend'] == 'BEARISH':
+    """Walk-forward setup search: every entry decision uses only data available
+    at (or before) the entry bar — causal swing detection, causal weekly trend,
+    and causal indicators — so there is no look-ahead bias.
+
+    Full-history swings are used ONLY to cheaply enumerate candidate W2-bottom
+    locations; each candidate is then re-derived and validated causally."""
+    full_swings = scanner.detect_swings(daily_df)
+    if len(full_swings) < 3:
         return []
 
-    swings = scanner.detect_swings(daily_df)
-    if len(swings) < 3:
-        return []
-
+    # RSI/MACD/Stoch/ATR are EWM/rolling (backward-looking), so slicing the
+    # full-history series to [:bi+1] yields the same values a causal recompute would.
     indicators = scanner.calculate_indicators(daily_df)
     setups = []
     seen = set()
 
     # ── Wave 3 ──
-    for i in range(len(swings) - 2):
-        if swings[i]['type'] != 'low' or swings[i+1]['type'] != 'high' or swings[i+2]['type'] != 'low':
+    for i in range(len(full_swings) - 2):
+        if (full_swings[i]['type'] != 'low' or full_swings[i+1]['type'] != 'high'
+                or full_swings[i+2]['type'] != 'low'):
             continue
-        w1o, w1p, w2b = swings[i], swings[i+1], swings[i+2]
-        w1_move = w1p['price'] - w1o['price']
-        if w1_move <= 0 or w1_move / w1o['price'] < 0.10:
-            continue
-        ok, _ = scanner.validate_cardinal_rules(w1o['price'], w1p['price'], w2b['price'])
-        if not ok:
-            continue
-        w2_ret = (w1p['price'] - w2b['price']) / w1_move
-        fd = scanner.fib_distance(w2_ret, scanner.FIB_W2_IMPULSE)
-        if fd > scanner.FIB_TOLERANCE:
-            continue
-
-        sig_idx = w2b['idx'] + SWING_CONFIRM_BARS
+        w2b_idx_full = full_swings[i+2]['idx']
+        sig_idx = w2b_idx_full + SWING_CONFIRM_BARS
         if sig_idx >= len(daily_df):
-            continue
-        key = ('W3', w1o['idx'], w2b['idx'])
-        if key in seen:
             continue
 
         for bi in range(sig_idx, min(sig_idx + 90, len(daily_df))):
             bd = daily_df.index[bi]
             if bd < BACKTEST_START or bd > BACKTEST_END:
                 continue
+
+            # ---- CAUSAL: re-detect the wave structure from data up to the entry bar ----
+            cswings = scanner.detect_swings(daily_df.iloc[:bi+1])
+            if len(cswings) < 3:
+                break
+            if (cswings[-1]['type'] != 'low' or cswings[-2]['type'] != 'high'
+                    or cswings[-3]['type'] != 'low'):
+                break  # no valid low-high-low established yet at this bar
+            w1o, w1p, w2b = cswings[-3], cswings[-2], cswings[-1]
+            # The causally-confirmed low must be the same W2 bottom we enumerated.
+            if abs(w2b['idx'] - w2b_idx_full) > SWING_CONFIRM_BARS:
+                break
+
+            key = ('W3', w1o['idx'], w2b['idx'])
+            if key in seen:
+                break
+
+            w1_move = w1p['price'] - w1o['price']
+            if w1_move <= 0 or w1_move / w1o['price'] < 0.10:
+                break
+            ok, _ = scanner.validate_cardinal_rules(w1o['price'], w1p['price'], w2b['price'])
+            if not ok:
+                break
+            w2_ret = (w1p['price'] - w2b['price']) / w1_move
+            fd = scanner.fib_distance(w2_ret, scanner.FIB_W2_IMPULSE)
+            if fd > scanner.FIB_TOLERANCE:
+                break
+
+            # Causal weekly trend — only weekly bars on or before the entry date.
+            wk_hist = weekly_df[weekly_df.index <= bd] if weekly_df is not None else None
+            weekly_info = scanner.count_weekly_waves(wk_hist)
+            if weekly_info['trend'] == 'BEARISH':
+                break
+
             ep = float(daily_df['Close'].iloc[bi])
             rec = (ep - w2b['price']) / w2b['price'] * 100
             if rec < -5 or rec > 80:
-                continue
+                break
             stop = w2b['price'] * (1 - scanner.STOP_BUFFER)
             risk = ep - stop
             if risk <= 0:
-                continue
+                break
             rp = risk / ep * 100
             if rp < scanner.MIN_RISK_PCT or rp > scanner.MAX_RISK_PCT:
-                continue
+                break
             t1 = w2b['price'] + w1_move
             t2 = w1p['price']
             t3 = w2b['price'] + 1.618 * w1_move
@@ -149,7 +176,7 @@ def find_setups_for_ticker(ticker, daily_df, weekly_df):
             if t2 < t1: t2 = t1 * 1.05
             rr = (t1 - ep) / risk
             if rr < scanner.MIN_RR_T1:
-                continue
+                break
 
             ch = scanner.calculate_channel(
                 (w1o['idx'], w1o['price']), (w2b['idx'], w2b['price']),
@@ -176,8 +203,7 @@ def find_setups_for_ticker(ticker, daily_df, weekly_df):
                     'entry': ep, 'stop': stop, 't1': t1, 't2': t2,
                     'risk': risk, 'risk_pct': rp, 'rr_t1': rr, 'score': sc,
                 })
-                break
-            break  # only check first valid bar per pattern
+            break  # only evaluate the first in-range bar for this pattern
 
     return setups
 
