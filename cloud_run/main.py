@@ -31,6 +31,8 @@ TELEGRAM_CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID', '')
 MIN_SCORE = int(os.environ.get('MIN_SCORE', '95'))
 SETUP_FILTERS = os.environ.get('SETUP_FILTERS', 'WAVE_3,WAVE_5,CORRECTION').split(',')
 REGIME_FILTER_ENABLED = os.environ.get('REGIME_FILTER', 'true').lower() == 'true'
+POSITION_PCT = float(os.environ.get('POSITION_PCT', '0.05'))   # notional % of account per trade
+ACCOUNT_SIZE = float(os.environ.get('ACCOUNT_SIZE', '0'))       # 0 = show % only (no share count)
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -464,7 +466,7 @@ def monitor_endpoint():
                                 print(f"  [{tf} SKIP risk {risk_pct:.1%}]", end='')
                                 continue
 
-                            msg = monitor.fmt_entry(ticker, c, analysis, daily)
+                            msg = monitor.fmt_entry(ticker, c, analysis, daily, POSITION_PCT, ACCOUNT_SIZE)
                             send_telegram(msg)
                             record_alert_sheets(sh, ticker, alert_key)
                             log_trade_event(sh, 'ENTRY', ticker,
