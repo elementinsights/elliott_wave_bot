@@ -470,26 +470,12 @@ def update_trade(trade, bar_high, bar_low, bar_close, atr_val):
         trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 2.5 * atr_val)
         trade['stage'] = 4
 
-    # T1 — book 75%, ride the remaining 25% to T2 (Aleks's two-stage exit)
-    if trade['t1'] > 0 and bar_high >= trade['t1'] and not trade.get('t1_reached'):
-        trade['t1_reached'] = True
-        trade['position_pct'] = 0.25
-        trade['current_stop'] = max(trade['current_stop'], trade['t1'] - initial_risk)
-        trade['stage'] = max(trade.get('stage', 1), 5)
-        trade['partial_event'] = True   # signals the caller to log a 75% partial fill
-        return fmt_t1_hit(trade['ticker'], trade['t1'], entry, trade['current_stop'])
-
-    # Past T1: tighter trail on the 25% runner
-    if trade.get('t1_reached'):
-        trade['current_stop'] = max(trade['current_stop'], trade['max_price'] - 2.0 * atr_val)
-        trade['stage'] = max(trade.get('stage', 1), 6)
-
-    # T2 — exit the remaining 25%
-    if trade['t2'] > 0 and bar_high >= trade['t2'] and trade.get('t1_reached'):
-        pnl = (trade['t2'] - entry) / entry * 100
+    # Exit 100% at T1 — highest-Sharpe exit (optimizer sweep; returns come from sizing)
+    if trade['t1'] > 0 and bar_high >= trade['t1']:
+        pnl = (trade['t1'] - entry) / entry * 100
         trade['status'] = 'CLOSED'
-        trade['exit_price'] = trade['t2']
-        return fmt_exit(trade['ticker'], 'T2 HIT', trade['t2'], pnl)
+        trade['exit_price'] = trade['t1']
+        return fmt_exit(trade['ticker'], 'T1 HIT', trade['t1'], pnl)
 
     if trade['current_stop'] != old_stop:
         return fmt_stop_update(trade['ticker'], old_stop, trade['current_stop'],

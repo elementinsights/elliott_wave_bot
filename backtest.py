@@ -106,6 +106,7 @@ def find_setups_for_ticker(ticker, daily_df, weekly_df):
     # RSI/MACD/Stoch/ATR are EWM/rolling (backward-looking), so slicing the
     # full-history series to [:bi+1] yields the same values a causal recompute would.
     indicators = scanner.calculate_indicators(daily_df)
+    sma200 = daily_df['Close'].rolling(200).mean()   # for the dist-200 entry filter
     setups = []
     seen = set()
 
@@ -158,6 +159,10 @@ def find_setups_for_ticker(ticker, daily_df, weekly_df):
                 break
 
             ep = float(daily_df['Close'].iloc[bi])
+            # Edge filter: skip names extended >15% above their 200-day SMA
+            s200 = sma200.iloc[bi]
+            if pd.notna(s200) and s200 > 0 and (ep - s200) / s200 > 0.15:
+                break
             rec = (ep - w2b['price']) / w2b['price'] * 100
             if rec < -5 or rec > 80:
                 break
@@ -252,16 +257,10 @@ def run_simulation(all_setups, daily_data):
                           pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
                 trades.append(dict(tr)); closed.append(tk); continue
 
-            # Book 75% at T1, ride the remaining 25% to T2 (Aleks's two-stage exit)
-            if tr['pos'] == 1.0 and hi >= tr['t1']:
-                tr['realized'] += 0.75 * (tr['t1'] - e) * tr['shares']
-                tr['pos'] = 0.25
-                tr['current_stop'] = max(tr['current_stop'], tr['t1'] - r)
-                tr['stage'] = max(tr['stage'], 5)
-
-            if tr['pos'] < 1.0 and hi >= tr['t2']:
-                pnl = tr['realized'] + tr['pos'] * (tr['t2'] - e) * tr['shares']
-                tr.update(exit_date=date, exit_price=tr['t2'], reason='T2',
+            # Exit 100% at T1 — highest-Sharpe exit (optimizer sweep)
+            if hi >= tr['t1']:
+                pnl = tr['realized'] + tr['pos'] * (tr['t1'] - e) * tr['shares']
+                tr.update(exit_date=date, exit_price=tr['t1'], reason='T1',
                           pnl=pnl, pnl_pct=pnl/tr['trade_size']*100, hold_days=hd)
                 trades.append(dict(tr)); closed.append(tk); continue
 
