@@ -51,7 +51,7 @@ gcloud run deploy "${SERVICE_NAME}" \
     --min-instances 0 \
     --no-allow-unauthenticated \
     --service-account "elliott-wave@${PROJECT_ID}.iam.gserviceaccount.com" \
-    --set-env-vars="^||^TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}||TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}||GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}||MIN_SCORE=95||SETUP_FILTERS=WAVE_3,WAVE_5||REGIME_FILTER=true||POSITION_PCT=${POSITION_PCT:-0.05}||ACCOUNT_SIZE=${ACCOUNT_SIZE:-0}"
+    --set-env-vars="^||^TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}||TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}||GOOGLE_SHEET_ID=${GOOGLE_SHEET_ID}||MIN_SCORE=95||SETUP_FILTERS=WAVE_3,WAVE_5||REGIME_FILTER=true||POSITION_PCT=${POSITION_PCT:-0.05}||ACCOUNT_SIZE=${ACCOUNT_SIZE:-0}||EOD_ALLOC_USD=${EOD_ALLOC_USD:-10000}"
 
 # Get service URL
 SERVICE_URL=$(gcloud run services describe "${SERVICE_NAME}" \
@@ -96,6 +96,22 @@ gcloud scheduler jobs create http "ew-monitor" \
     --attempt-deadline 300s \
     --description "EWT entry monitor every 30 min during market hours"
 
+# EOD P&L summary: 5:05 PM ET weekdays (after close + the 4:30 scan)
+gcloud scheduler jobs delete "ew-eod-summary" \
+    --location "${REGION}" --project "${PROJECT_ID}" --quiet 2>/dev/null || true
+
+gcloud scheduler jobs create http "ew-eod-summary" \
+    --location "${REGION}" \
+    --project "${PROJECT_ID}" \
+    --schedule "5 17 * * 1-5" \
+    --time-zone "America/New_York" \
+    --uri "${SERVICE_URL}/eod" \
+    --http-method GET \
+    --oidc-service-account-email "${SA_EMAIL}" \
+    --oidc-token-audience "${SERVICE_URL}" \
+    --attempt-deadline 300s \
+    --description "End-of-day P&L summary to Telegram (5:05 PM ET)"
+
 # Clean up copied files from build context
 rm -f ew_scanner_v2.py ew_monitor.py service_account.json
 
@@ -104,8 +120,10 @@ echo "=== Deploy complete ==="
 echo "Service:  ${SERVICE_URL}"
 echo "Scanner:  daily at 4:30 PM ET (Mon-Fri)"
 echo "Monitor:  every 30 min during market hours (Mon-Fri)"
+echo "EOD P&L:  daily at 5:05 PM ET (Mon-Fri)"
 echo ""
 echo "Test endpoints:"
 echo "  curl -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" ${SERVICE_URL}/"
 echo "  curl -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" ${SERVICE_URL}/monitor"
 echo "  curl -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" ${SERVICE_URL}/scan"
+echo "  curl -H \"Authorization: Bearer \$(gcloud auth print-identity-token)\" ${SERVICE_URL}/eod"

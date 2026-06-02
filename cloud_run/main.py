@@ -3,6 +3,7 @@
 Elliott Wave Cloud Run Service
 - /scan:    Run full scanner, update watchlist + results in Google Sheets
 - /monitor: Check watchlist for Fib entries, send Telegram alerts, log trades
+- /eod:     End-of-day P&L summary (unrealized + realized vs yesterday) to Telegram
 - /health:  Health check
 """
 
@@ -33,6 +34,7 @@ SETUP_FILTERS = os.environ.get('SETUP_FILTERS', 'WAVE_3,WAVE_5,CORRECTION').spli
 REGIME_FILTER_ENABLED = os.environ.get('REGIME_FILTER', 'true').lower() == 'true'
 POSITION_PCT = float(os.environ.get('POSITION_PCT', '0.05'))   # notional % of account per trade
 ACCOUNT_SIZE = float(os.environ.get('ACCOUNT_SIZE', '0'))       # 0 = show % only (no share count)
+EOD_ALLOC_USD = float(os.environ.get('EOD_ALLOC_USD', '10000'))  # flat $ per position for EOD P&L
 
 SCOPES = [
     'https://www.googleapis.com/auth/spreadsheets',
@@ -47,6 +49,7 @@ OPEN_TRADES_HEADERS = ['ticker', 'setup_type', 'entry', 'initial_stop', 'current
                        't1', 't2', 'max_price', 't1_reached', 'stage', 'status',
                        'entry_date', 'bars_since_entry']
 ALERT_HISTORY_HEADERS = ['timestamp', 'ticker', 'type']
+DAILY_PNL_HEADERS = ['date', 'unrealized', 'realized', 'net', 'open_count', 'closed_count']
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -217,16 +220,18 @@ def should_alert(ticker, alert_type, history, cooldown_hours=4):
 # TELEGRAM
 # ═══════════════════════════════════════════════════════════════════════
 
-def send_telegram(message):
+def send_telegram(message, parse_mode=None):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print(f"  [NO TG] {message[:80]}...")
         return False
     try:
+        payload = {'chat_id': TELEGRAM_CHAT_ID, 'text': message,
+                   'disable_web_page_preview': True}
+        if parse_mode:
+            payload['parse_mode'] = parse_mode
         resp = _requests.post(
             f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={'chat_id': TELEGRAM_CHAT_ID, 'text': message,
-                  'disable_web_page_preview': True},
-            timeout=10)
+            json=payload, timeout=10)
         return resp.status_code == 200
     except Exception as e:
         print(f"  [TG ERR] {e}")
@@ -581,6 +586,200 @@ def monitor_endpoint():
     except Exception as e:
         traceback.print_exc()
         send_telegram(f"Monitor Error: {str(e)[:200]}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# /eod — END-OF-DAY P&L SUMMARY
+# ═══════════════════════════════════════════════════════════════════════
+
+def read_trade_log(sh):
+    ws = get_or_create_tab(sh, 'Trade Log', TRADE_LOG_HEADERS)
+    return ws.get_all_records()
+
+
+def _settled_closes(tickers):
+    """Most recent settled daily close for each ticker (the end-of-day mark)."""
+    prices = {}
+    if not tickers:
+        return prices
+    try:
+        data = yf.download(tickers, period='5d', interval='1d',
+                           progress=False, group_by='ticker')
+    except Exception:
+        data = None
+    for t in tickers:
+        px = None
+        try:
+            s = data[t]['Close'].dropna()
+            if len(s):
+                px = float(s.iloc[-1])
+        except Exception:
+            px = None
+        if px is None:  # per-ticker fallback (handles single-ticker / odd frames)
+            try:
+                df = yf.download(t, period='5d', interval='1d', progress=False)
+                if isinstance(df.columns, pd.MultiIndex):
+                    df.columns = df.columns.droplevel(1)
+                px = float(df['Close'].dropna().iloc[-1])
+            except Exception:
+                px = None
+        prices[t] = px
+    return prices
+
+
+def compute_eod_pnl(sh):
+    """Mark open positions to the settled close and tally realized exits.
+    Every position is sized at a flat EOD_ALLOC_USD; exit model is 100%@T1
+    (see ew_monitor.update_trade), so each trade is fully open or fully closed."""
+    alloc = EOD_ALLOC_USD
+    open_recs = [r for r in read_open_trades(sh)
+                 if str(r.get('status', '')).upper() == 'OPEN']
+    exits = [r for r in read_trade_log(sh)
+             if str(r.get('type', '')).upper() == 'EXIT']
+
+    open_tickers = [str(r['ticker']) for r in open_recs]
+    prices = _settled_closes(open_tickers)
+
+    unrealized = 0.0
+    missing = []
+    for r in open_recs:
+        t = str(r['ticker'])
+        try:
+            entry = float(r['entry'])
+        except (TypeError, ValueError):
+            continue
+        px = prices.get(t)
+        if px is None or entry <= 0:
+            missing.append(t)
+            continue
+        unrealized += alloc * (px / entry - 1)
+
+    realized = 0.0
+    for r in exits:
+        try:
+            entry = float(r['entry'])
+            exit_px = float(r['price'])
+        except (TypeError, ValueError):
+            continue
+        if entry > 0:
+            realized += alloc * (exit_px / entry - 1)
+
+    open_count = len(open_tickers) - len(missing)
+    return {
+        'unrealized': unrealized,
+        'realized': realized,
+        'net': unrealized + realized,
+        'open_count': open_count,
+        'closed_count': len(exits),
+        'deployed': alloc * open_count,
+        'missing': missing,
+    }
+
+
+def read_prior_pnl(sh, today_str):
+    """Most recent stored snapshot from a prior day (the 'Yesterday' baseline)."""
+    ws = get_or_create_tab(sh, 'Daily PnL', DAILY_PNL_HEADERS)
+    recs = ws.get_all_records()
+    prior = [r for r in recs
+             if str(r.get('date', '')).strip() and str(r.get('date')) != today_str]
+    return prior[-1] if prior else None
+
+
+def save_pnl_snapshot(sh, today_str, summary):
+    """Upsert today's snapshot (idempotent if /eod runs more than once)."""
+    ws = get_or_create_tab(sh, 'Daily PnL', DAILY_PNL_HEADERS)
+    recs = ws.get_all_records()
+    values = [today_str, round(summary['unrealized']), round(summary['realized']),
+              round(summary['net']), summary['open_count'], summary['closed_count']]
+    for i, r in enumerate(recs):
+        if str(r.get('date')) == today_str:
+            ws.update(values=[values], range_name=f'A{i + 2}:F{i + 2}')
+            return
+    ws.append_row(values)
+
+
+def _money(x):
+    x = round(x)
+    return f"{'+' if x >= 0 else '-'}${abs(x):,}"
+
+
+def format_eod_message(today_str, summary, prior):
+    LW, NW = 22, 9  # label width, number-column width
+
+    def yval(key):
+        try:
+            return _money(float(prior.get(key, 0))) if prior else '—'
+        except (TypeError, ValueError):
+            return '—'
+
+    def dval(key, now):
+        if not prior:
+            return '—'
+        try:
+            d = round(now) - round(float(prior.get(key, 0)))
+        except (TypeError, ValueError):
+            return '—'
+        return '—' if d == 0 else _money(d)
+
+    oc, cc = summary['open_count'], summary['closed_count']
+    body = [
+        (f"Unrealized ({oc} open)", summary['unrealized'], 'unrealized'),
+        (f"Realized ({cc} closed)", summary['realized'], 'realized'),
+    ]
+    rule = '-' * (LW + NW * 3)
+    lines = [f"{'':<{LW}}{'Now':>{NW}}{'Yest':>{NW}}{'Δ':>{NW}}", rule]
+    for label, now, key in body:
+        lines.append(f"{label:<{LW}}{_money(now):>{NW}}{yval(key):>{NW}}{dval(key, now):>{NW}}")
+    lines.append(rule)
+    lines.append(f"{'Net total':<{LW}}{_money(summary['net']):>{NW}}"
+                 f"{yval('net'):>{NW}}{dval('net', summary['net']):>{NW}}")
+
+    deployed = summary['deployed']
+    ret = (summary['unrealized'] / deployed * 100) if deployed else 0.0
+    footer = f"{oc} open · ${deployed / 1000:.0f}k deployed · {ret:+.2f}% on open"
+    note = "" if not summary['missing'] else f"\n⚠️ no price: {', '.join(summary['missing'])}"
+    table = "\n".join(lines)
+    return (f"📊 <b>End-of-Day P&amp;L</b> — {today_str}\n"
+            f"<pre>{table}</pre>\n{footer}{note}")
+
+
+@app.route('/eod')
+def eod_endpoint():
+    t0 = time.time()
+    try:
+        today_str = datetime.now().strftime('%Y-%m-%d')
+        print(f"\n{'=' * 60}\n  EOD P&L — {today_str}\n{'=' * 60}")
+
+        gc = get_sheets_client()
+        sh = gc.open_by_key(SHEET_ID)
+
+        summary = compute_eod_pnl(sh)
+        prior = read_prior_pnl(sh, today_str)
+        send_telegram(format_eod_message(today_str, summary, prior), parse_mode='HTML')
+        save_pnl_snapshot(sh, today_str, summary)
+
+        print(f"  unrealized={summary['unrealized']:.0f} realized={summary['realized']:.0f} "
+              f"net={summary['net']:.0f} open={summary['open_count']} "
+              f"closed={summary['closed_count']} ({time.time() - t0:.0f}s)")
+        if summary['missing']:
+            print(f"  missing prices: {summary['missing']}")
+
+        return jsonify({
+            'status': 'ok',
+            'date': today_str,
+            'unrealized': round(summary['unrealized']),
+            'realized': round(summary['realized']),
+            'net': round(summary['net']),
+            'open_count': summary['open_count'],
+            'closed_count': summary['closed_count'],
+            'missing': summary['missing'],
+            'elapsed_seconds': round(time.time() - t0),
+        })
+
+    except Exception as e:
+        traceback.print_exc()
+        send_telegram(f"EOD Summary Error: {str(e)[:200]}")
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
 
