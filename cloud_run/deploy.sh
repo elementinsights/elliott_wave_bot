@@ -96,21 +96,27 @@ gcloud scheduler jobs create http "ew-monitor" \
     --attempt-deadline 300s \
     --description "EWT entry monitor every 30 min during market hours"
 
-# EOD P&L summary: 5:05 PM ET weekdays (after close + the 4:30 scan)
+# EOD P&L summary: 5:45 PM ET weekdays. The 4:30 scan takes ~43 min and the
+# service runs max-instances=1/concurrency=1, so anything before ~5:15 gets a
+# 429 while the scan holds the only slot. Retries cover unusually slow scans.
 gcloud scheduler jobs delete "ew-eod-summary" \
     --location "${REGION}" --project "${PROJECT_ID}" --quiet 2>/dev/null || true
 
 gcloud scheduler jobs create http "ew-eod-summary" \
     --location "${REGION}" \
     --project "${PROJECT_ID}" \
-    --schedule "5 17 * * 1-5" \
+    --schedule "45 17 * * 1-5" \
     --time-zone "America/New_York" \
     --uri "${SERVICE_URL}/eod" \
     --http-method GET \
     --oidc-service-account-email "${SA_EMAIL}" \
     --oidc-token-audience "${SERVICE_URL}" \
     --attempt-deadline 300s \
-    --description "End-of-day P&L summary to Telegram (5:05 PM ET)"
+    --max-retry-attempts 3 \
+    --min-backoff 10m \
+    --max-backoff 20m \
+    --max-retry-duration 1h \
+    --description "End-of-day P&L summary to Telegram (5:45 PM ET)"
 
 # Clean up copied files from build context
 rm -f ew_scanner_v2.py ew_monitor.py service_account.json
