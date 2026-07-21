@@ -40,7 +40,7 @@ def download_all_data():
         all_traded = scanner.get_all_traded_tickers()
     except Exception:
         all_traded = []
-    universe = list(set(sp500 + smallmid + all_traded + scanner.CURATED_ETFS))
+    universe = list(set(sp500 + smallmid + all_traded))
     print(f"  {len(universe)} unique tickers")
 
     end = BACKTEST_END.strftime('%Y-%m-%d')

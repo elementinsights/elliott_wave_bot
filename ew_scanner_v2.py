@@ -87,8 +87,33 @@ def get_smallmid_tickers():
             pass
     return list(set(t.replace('.', '-') for t in tickers if isinstance(t, str)))
 
+_ETF_SYMBOLS = None
+
+def get_etf_symbols():
+    """Set of every ETF-flagged symbol in the NASDAQ trader file (cached).
+
+    Used to keep legacy ETF positions out of P&L reporting. The scanner no
+    longer emits ETF setups at all — see get_all_traded_tickers() for why."""
+    global _ETF_SYMBOLS
+    if _ETF_SYMBOLS is None:
+        import csv
+        url = 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt'
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        reader = csv.reader(resp.text.strip().split('\n'), delimiter='|')
+        next(reader)  # header
+        _ETF_SYMBOLS = {row[1].strip() for row in reader
+                        if len(row) > 5 and row[5].strip() == 'Y'}
+    return _ETF_SYMBOLS
+
 def get_all_traded_tickers():
-    """Pull all NASDAQ/NYSE/AMEX traded stocks + ETFs from NASDAQ trader file."""
+    """Pull all NASDAQ/NYSE/AMEX traded common stocks from NASDAQ trader file.
+
+    ETFs are excluded: across 183 live trades they won 14% of the time vs 43%
+    for common stocks, and accounted for 60% of realized losses (0 of the first
+    31 closed ETF trades was a winner). Elliott Wave structure reads one crowd's
+    supply/demand — a basket averages the impulse away, and leveraged/commodity/
+    option-income funds carry decay or capped upside on top of that.
+    """
     import csv
     url = 'https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqtraded.txt'
     resp = requests.get(url, headers=HEADERS, timeout=15)
@@ -101,8 +126,11 @@ def get_all_traded_tickers():
             continue
         sym = row[1].strip()
         name = row[2] if len(row) > 2 else ''
+        is_etf = row[5].strip() if len(row) > 5 else ''
         test = row[7] if len(row) > 7 else ''
         if test == 'Y' or not sym or 'File Creation' in sym:
+            continue
+        if is_etf == 'Y':
             continue
         if any(c in sym for c in [' ', '^', '.', '/', '$']):
             continue
@@ -113,20 +141,6 @@ def get_all_traded_tickers():
             continue
         tickers.append(sym)
     return list(set(tickers))
-
-CURATED_ETFS = [
-    'SPY', 'QQQ', 'IWM', 'DIA', 'VTI', 'VOO',
-    'XLF', 'XLE', 'XLK', 'XLV', 'XLI', 'XLC', 'XLU', 'XLP', 'XLB', 'XLY', 'XLRE',
-    'GLD', 'SLV', 'GDX', 'GDXJ', 'SIL',
-    'USO', 'UNG', 'XOP', 'OIH',
-    'ARKK', 'ARKG', 'ARKF', 'ARKW',
-    'UVXY', 'VXX', 'VIXY',
-    'SMH', 'SOXX', 'XBI', 'IBB', 'REMX',
-    'TLT', 'HYG', 'LQD', 'JNK',
-    'EEM', 'EFA', 'FXI', 'EWJ',
-    'KWEB', 'MCHI',
-    'BITX', 'BITO',
-]
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATA DOWNLOAD
@@ -1430,11 +1444,11 @@ def main():
     smallmid = get_smallmid_tickers()
     try:
         all_traded = get_all_traded_tickers()
-        print(f"  Sources: {len(sp500)} S&P 500 + {len(smallmid)} Small/Mid + {len(all_traded)} NASDAQ/NYSE traded + {len(CURATED_ETFS)} ETFs")
+        print(f"  Sources: {len(sp500)} S&P 500 + {len(smallmid)} Small/Mid + {len(all_traded)} NASDAQ/NYSE traded (ETFs excluded)")
     except Exception as e:
         all_traded = []
         print(f"  NASDAQ traded fetch failed ({e}), using index-only universe")
-    universe = list(set(sp500 + smallmid + all_traded + CURATED_ETFS))
+    universe = list(set(sp500 + smallmid + all_traded))
     print(f"  Universe: {len(universe)} unique tickers (will filter by ${MIN_MARKET_CAP/1e6:.0f}M+ market cap)")
 
     # Phase 2A: Quick screen — download 1 month to filter by dollar volume
