@@ -275,7 +275,7 @@ def scan_endpoint():
             all_traded = scanner.get_all_traded_tickers()
         except Exception:
             all_traded = []
-        universe = list(set(sp500 + smallmid + all_traded + scanner.CURATED_ETFS))
+        universe = list(set(sp500 + smallmid + all_traded))
         print(f"  Universe: {len(universe)} tickers")
 
         # Quick screen (1 month)
@@ -633,10 +633,20 @@ def compute_eod_pnl(sh):
     Every position is sized at a flat EOD_ALLOC_USD; exit model is 100%@T1
     (see ew_monitor.update_trade), so each trade is fully open or fully closed."""
     alloc = EOD_ALLOC_USD
+    # ETFs are reported as if never traded (they won 14% vs 43% for stocks and
+    # drove 60% of realized losses). The scanner no longer emits them; this skips
+    # any legacy rows so historical and future totals stay on the same basis.
+    try:
+        etfs = scanner.get_etf_symbols()
+    except Exception as e:
+        print(f"  [EOD WARN] ETF list unavailable ({e}) — totals include ETFs")
+        etfs = set()
     open_recs = [r for r in read_open_trades(sh)
-                 if str(r.get('status', '')).upper() == 'OPEN']
+                 if str(r.get('status', '')).upper() == 'OPEN'
+                 and str(r.get('ticker', '')).strip() not in etfs]
     exits = [r for r in read_trade_log(sh)
-             if str(r.get('type', '')).upper() == 'EXIT']
+             if str(r.get('type', '')).upper() == 'EXIT'
+             and str(r.get('ticker', '')).strip() not in etfs]
 
     open_tickers = [str(r['ticker']) for r in open_recs]
     prices = _settled_closes(open_tickers)
