@@ -412,6 +412,19 @@ def monitor_endpoint():
         open_trades = read_open_trades(sh)
         alert_history = read_alert_history(sh)
 
+        # The scanner no longer emits ETFs, but a watchlist written by an older
+        # scan can still hold them until the next scan overwrites it — drop them
+        # here so a stale row can never open a position we would not take.
+        try:
+            etfs = scanner.get_etf_symbols()
+            stale = [c for c in watchlist if str(c.get('ticker', '')).strip() in etfs]
+            if stale:
+                print(f"  Skipping {len(stale)} stale ETF candidate(s): "
+                      f"{', '.join(c['ticker'] for c in stale)}")
+                watchlist = [c for c in watchlist if c not in stale]
+        except Exception as e:
+            print(f"  [MONITOR WARN] ETF list unavailable ({e}) — watchlist unfiltered")
+
         if not watchlist:
             return jsonify({'status': 'ok', 'alerts': 0, 'message': 'empty watchlist'})
 
